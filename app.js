@@ -4,7 +4,18 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/fireba
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import { getFirestore, doc, onSnapshot, setDoc, collection, query, where, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
-const S = window.SITE, TESTS = window.TESTS || {};
+const S = window.SITE;
+const TESTS = window.TESTS = window.TESTS || {};
+const bankLoads = {};
+function loadBank(id) { // tests-<subject>.js is fetched on first visit; a missing file just means no tests yet
+  return bankLoads[id] ||= new Promise((ok) => {
+    if (TESTS[id]) return ok(TESTS[id]);
+    const sc = document.createElement('script');
+    sc.src = `tests-${id}.js?v=${S.testsVersion || 1}`;
+    sc.onload = sc.onerror = () => ok(TESTS[id]);
+    document.head.appendChild(sc);
+  });
+}
 const QUIZ_LEN = 30;
 const DAYS = ['السبت', 'الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
 const $ = (id) => document.getElementById(id);
@@ -165,6 +176,7 @@ const routes = {
 
   tests(id) {
     const s = subj(id); if (!s) return go('#/subjects');
+    if (!(id in TESTS)) { app.innerHTML = '<div class="card center muted">جاري التحميل…</div>'; loadBank(id).then(() => { TESTS[id] ||= null; rerender(); }); return; }
     const bank = TESTS[id];
     let html = `<div class="crumb"><a href="#/subjects">المواد</a> ‹ <a href="#/subject/${s.id}">${esc(s.name)}</a> ‹ اختبارات</div>
       <h2 class="page">📝 اختبارات ${esc(s.name)}</h2>`;
@@ -177,6 +189,7 @@ const routes = {
   },
 
   quiz(id, lid) {
+    if (!(id in TESTS)) { loadBank(id).then(() => { TESTS[id] ||= null; render(); }); return; }
     const s = subj(id), bank = TESTS[id];
     const lesson = bank && bank.units.flatMap((u) => u.lessons).find((l) => l.id === lid);
     if (!s || !lesson) return go('#/subjects');
