@@ -11,7 +11,7 @@ function loadBank(id) { // tests-<subject>.js is fetched on first visit; a missi
   return bankLoads[id] ||= new Promise((ok) => {
     if (TESTS[id]) return ok(TESTS[id]);
     const sc = document.createElement('script');
-    sc.src = `tests-${id}.js?v=${S.testsVersion || 1}`;
+    sc.src = `tests-${id}.js?h=${Math.floor(Date.now() / 36e5)}`; // hourly cache-bust so new questions show up
     sc.onload = sc.onerror = () => ok(TESTS[id]);
     document.head.appendChild(sc);
   });
@@ -245,6 +245,9 @@ async function drawPage(pdf, n, el) {
 }
 
 // ---- quiz engine ----
+const MATHY = /^[\d\s+−×÷=().,/^²³√-]+$/; // bare arithmetic reads left-to-right even on an RTL page
+const LATIN = /^[\s"'(«]*[A-Za-z]/;
+const dirAttr = (t) => LATIN.test(t) ? ' dir="ltr" style="text-align:left"' : MATHY.test(t) ? ' dir="ltr" style="text-align:right"' : '';
 function runQuiz(s, lesson) {
   const qs = shuffle(lesson.q).slice(0, QUIZ_LEN).map(([text, opts]) => {
     const order = shuffle(opts.map((o, i) => i));
@@ -259,8 +262,8 @@ function runQuiz(s, lesson) {
     app.innerHTML = `${back}<div class="card">
       <div class="qnum"><span>السؤال ${i + 1} من ${qs.length}</span><span>✅ ${score}</span></div>
       <div class="qbar"><i style="width:${(i / qs.length) * 100}%"></i></div>
-      <div class="qtext">${esc(q.text)}</div>
-      <div class="opts">${q.opts.map((o, k) => `<button class="opt" data-k="${k}">${esc(o)}</button>`).join('')}</div>
+      <div class="qtext"${dirAttr(q.text)}>${esc(q.text)}</div>
+      <div class="opts">${q.opts.map((o, k) => `<button class="opt" data-k="${k}"${dirAttr(o)}>${esc(o)}</button>`).join('')}</div>
       <div class="qnext" id="qnext"></div></div>`;
     app.querySelectorAll('.opt').forEach((b) => b.onclick = () => pick(+b.dataset.k));
   }
