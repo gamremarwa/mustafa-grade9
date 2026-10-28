@@ -1,8 +1,9 @@
 // Shared app for the student study sites. Student-specific data lives in config.js,
 // quiz banks in tests-*.js (window.TESTS[subjectId]).
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-import { getFirestore, doc, onSnapshot, setDoc, collection, query, where, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-app.js';
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-auth.js';
+import { getFirestore, doc, onSnapshot, setDoc, collection, query, where, serverTimestamp, arrayUnion, increment } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-firestore.js';
+import { getAI, getGenerativeModel, GoogleAIBackend } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-ai.js';
 
 const S = window.SITE;
 const TESTS = window.TESTS = window.TESTS || {};
@@ -24,8 +25,8 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const subj = (id) => S.subjects.find((s) => s.id === id);
 
 // ---- state synced from Firestore ----
-let info = null;          // students/{sid}: {note, noteAt, order, start}
-let results = {};         // key `${subject}_${lesson}` -> {score, best, at}
+let info = null;          // students/{sid}: {note, noteAt, order, start, grades[]}
+let results = {};         // key `${subject}_${lesson}` -> {score, best, at, attempts, history[], missed[]}
 let isMama = false;
 let infoLoaded = false;
 
@@ -107,6 +108,9 @@ const routes = {
       <div class="big">
         <a class="bigbtn" href="#/schedule"><span class="ic">🗓️</span><b>جدول الدراسة</b><small>مادة لكل يوم</small></a>
         <a class="bigbtn" href="#/subjects"><span class="ic">📚</span><b>المواد</b><small>الكتب والاختبارات</small></a>
+        <a class="bigbtn" href="#/report"><span class="ic">📊</span><b>التقرير</b><small>نقاط القوة والضعف</small></a>
+        <a class="bigbtn" href="#/grades"><span class="ic">📝</span><b>علامات المدرسة</b><small>${isMama ? 'أضيفي علامة' : 'علاماتي'}</small></a>
+        <a class="bigbtn wide" href="#/ai"><span class="ic">🤖</span><b>المساعد الذكي</b><small>اسأله عن أي شيء في دروسك</small></a>
       </div>`;
     if (isMama) {
       $('saveNote').onclick = () => saveNote($('noteTxt').value.trim());
@@ -195,8 +199,166 @@ const routes = {
     if (!s || !lesson) return go('#/subjects');
     runQuiz(s, lesson);
   },
+
+  report(id) {
+    if (id) return subjectReport(id);
+    const st = S.subjects.map((s) => ({ s, ...subjectStats(s.id) }));
+    const tested = st.filter((x) => x.n);
+    const ranked = tested.slice().sort((a, b) => b.avg - a.avg);
+    let html = `<h2 class="page">📊 تقرير ${esc(S.name)}</h2>`;
+    if (!tested.length && !grades().length) html += '<div class="card center muted">لسا ما في اختبارات. لما يحل الاختبارات بيظهر التقرير هون.</div>';
+    else {
+      html += `<div class="statrow">
+        <div class="stat"><b>${tested.reduce((a, x) => a + x.attempts, 0)}</b><small>محاولة اختبار</small></div>
+        <div class="stat"><b>${tested.reduce((a, x) => a + x.n, 0)}</b><small>درس مختبَر</small></div>
+        <div class="stat"><b>${tested.length ? Math.round(tested.reduce((a, x) => a + x.avg, 0) / tested.length) : 0}%</b><small>المعدل العام</small></div></div>`;
+      if (ranked.length) html += `<div class="sw">
+        <div class="card"><h3>💪 نقاط القوة</h3>${ranked.filter((x) => x.avg >= 75).slice(0, 3).map((x) => `<div>${x.s.icon} ${esc(x.s.name)} <b>${x.avg}%</b></div>`).join('') || '<div class="muted">بعد شوية اختبارات بتبين</div>'}</div>
+        <div class="card"><h3>📌 بحاجة لتقوية</h3>${ranked.slice().reverse().filter((x) => x.avg < 75).slice(0, 3).map((x) => `<div>${x.s.icon} ${esc(x.s.name)} <b>${x.avg}%</b></div>`).join('') || '<div class="muted">ممتاز، ما في مواد ضعيفة 👏</div>'}</div></div>`;
+    }
+    html += `<h3 style="margin-top:18px">حسب المادة</h3><div class="grid">${st.map((x) => `
+      <a class="subj rep" style="--c:${x.s.color}" href="#/report/${x.s.id}"><span class="ic">${x.s.icon}</span><b>${esc(x.s.name)}</b>
+        ${x.n ? `<div class="meter"><i style="width:${x.avg}%;background:${lvl(x.avg).c}"></i></div><small>${x.avg}% • ${x.n} درس • ${x.attempts} محاولة</small>` : '<small class="muted">لم يُختبر</small>'}
+        ${x.g.length ? `<small>📝 علامات المدرسة: ${x.gAvg}%</small>` : ''}</a>`).join('')}</div>`;
+    app.innerHTML = html;
+  },
+
+  grades() {
+    const gs = grades().slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    let html = `<h2 class="page">📝 علامات المدرسة</h2>`;
+    if (isMama) html += `<div class="card gform"><h3>➕ إضافة علامة</h3>
+      <label>المادة<select id="gSub">${S.subjects.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></label>
+      <label>اسم الامتحان<input id="gTitle" placeholder="مثلاً: امتحان شهر أول"></label>
+      <div class="two"><label>العلامة<input id="gScore" type="number" min="0" step="0.5"></label>
+      <label>من<input id="gOut" type="number" min="1" value="20"></label></div>
+      <label>التاريخ<input id="gDate" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>
+      <button class="btn green" id="gAdd">حفظ العلامة</button></div>`;
+    else html += '<div class="muted" style="margin-bottom:10px">ماما بتضيف علامات امتحانات المدرسة من زر 🔒 ماما.</div>';
+    html += gs.length ? `<table class="gt"><tr><th>المادة</th><th>الامتحان</th><th>العلامة</th><th>التاريخ</th>${isMama ? '<th></th>' : ''}</tr>${gs.map((g) => {
+      const s = subj(g.subject), p = Math.round(g.score / g.outOf * 100);
+      return `<tr><td>${s ? s.icon + ' ' + esc(s.name) : ''}</td><td>${esc(g.title)}</td><td><span class="badge" style="background:${lvl(p).bg};color:${lvl(p).c}">${g.score}/${g.outOf}</span></td><td>${esc(g.date || '')}</td>${isMama ? `<td><button class="x" data-id="${g.id}">🗑</button></td>` : ''}</tr>`; }).join('')}</table>`
+      : '<div class="card center muted">لا توجد علامات بعد</div>';
+    app.innerHTML = html;
+    if (!isMama) return;
+    $('gAdd').onclick = async () => {
+      const g = { id: Date.now().toString(36), subject: $('gSub').value, title: $('gTitle').value.trim() || 'امتحان', score: +$('gScore').value, outOf: +$('gOut').value, date: $('gDate').value };
+      if (!(g.outOf > 0) || $('gScore').value === '' || g.score < 0 || g.score > g.outOf) return toast('تأكدي من العلامة');
+      try { await setDoc(infoRef, { grades: arrayUnion(g) }, { merge: true }); toast('تم حفظ العلامة ✅'); } catch { toast('ما زبط الحفظ'); }
+    };
+    app.querySelectorAll('.x').forEach((b) => b.onclick = async () => {
+      if (!confirm('حذف هذه العلامة؟')) return;
+      try { await setDoc(infoRef, { grades: grades().filter((g) => g.id !== b.dataset.id) }, { merge: true }); toast('تم الحذف'); } catch { toast('ما زبط الحذف'); }
+    });
+  },
+
+  ai() {
+    app.innerHTML = `<h2 class="page">🤖 المساعد الذكي</h2>
+      <div class="muted" style="margin-bottom:8px">اسأل عن أي درس أو سؤال، أو اطلب خطة مراجعة لنقاط ضعفك.</div>
+      <div class="chat" id="chat">${chatLog.map(bubble).join('') || `<div class="msg bot">أهلاً ${esc(S.name)} 👋 أنا مساعدك في الدراسة. شو بتحب نتعلم اليوم؟</div>`}</div>
+      <div class="chips">${['اعملّي خطة مراجعة لنقاط ضعفي', 'اشرحلي درساً من كتاب العربي بطريقة سهلة', 'اسألني 5 أسئلة في الرياضيات', 'كيف أنظّم وقت دراستي؟'].map((t) => `<button class="chip">${t}</button>`).join('')}</div>
+      <form class="ask" id="askF"><input id="askQ" placeholder="اكتب سؤالك…" autocomplete="off"><button class="btn">إرسال</button></form>`;
+    const box = $('chat'); box.scrollTop = box.scrollHeight;
+    app.querySelectorAll('.chip').forEach((c) => c.onclick = () => askAI(c.textContent));
+    $('askF').onsubmit = (e) => { e.preventDefault(); const q = $('askQ').value.trim(); if (q) { $('askQ').value = ''; askAI(q); } };
+  },
 };
-routes.subject.keep = routes.books.keep = routes.read.keep = true;
+routes.subject.keep = routes.books.keep = routes.read.keep = routes.ai.keep = true;
+
+// ---- report helpers ----
+const grades = () => (info && info.grades) || [];
+const lvl = (p) => p >= 85 ? { c: '#15803d', bg: '#dcfce7', t: 'ممتاز' } : p >= 70 ? { c: '#2563eb', bg: '#dbeafe', t: 'جيد جداً' } : p >= 50 ? { c: '#b45309', bg: '#fef3c7', t: 'بحاجة لتحسين' } : { c: '#b91c1c', bg: '#fee2e2', t: 'ضعيف' };
+const pct = (r) => Math.round(r.score / (r.total || QUIZ_LEN) * 100);
+function lessonAvg(r) { const h = r.history && r.history.length ? r.history : [r]; return Math.round(h.reduce((a, x) => a + x.score / (x.total || QUIZ_LEN), 0) / h.length * 100); }
+function subjectStats(id) {
+  const rs = Object.values(results).filter((r) => r.subject === id);
+  const g = grades().filter((x) => x.subject === id);
+  return {
+    rs, n: rs.length, attempts: rs.reduce((a, r) => a + (r.attempts || (r.history || [1]).length), 0),
+    avg: rs.length ? Math.round(rs.reduce((a, r) => a + lessonAvg(r), 0) / rs.length) : 0,
+    g, gAvg: g.length ? Math.round(g.reduce((a, x) => a + x.score / x.outOf, 0) / g.length * 100) : 0,
+  };
+}
+function subjectReport(id) {
+  const s = subj(id); if (!s) return go('#/report');
+  const x = subjectStats(id);
+  const rows = x.rs.map((r) => ({ r, avg: lessonAvg(r), last: pct(r) })).sort((a, b) => a.avg - b.avg);
+  let html = `<div class="crumb"><a href="#/report">التقرير</a> ‹ ${esc(s.name)}</div><h2 class="page">${s.icon} تقرير ${esc(s.name)}</h2>`;
+  html += `<div class="statrow"><div class="stat"><b>${x.avg}%</b><small>معدل الاختبارات</small></div>
+    <div class="stat"><b>${x.n}</b><small>درس مختبَر</small></div><div class="stat"><b>${x.attempts}</b><small>محاولة</small></div>
+    ${x.g.length ? `<div class="stat"><b>${x.gAvg}%</b><small>علامات المدرسة</small></div>` : ''}</div>`;
+  if (!rows.length) html += '<div class="card center muted">لم يُختبر في هذه المادة بعد</div>';
+  else {
+    const weak = rows.filter((w) => w.avg < 70).slice(0, 3), strong = rows.slice().reverse().filter((w) => w.avg >= 85).slice(0, 3);
+    html += `<div class="sw"><div class="card"><h3>💪 دروس قوي فيها</h3>${strong.map((w) => `<div>${esc(w.r.title || w.r.lesson)} <b>${w.avg}%</b></div>`).join('') || '<div class="muted">—</div>'}</div>
+      <div class="card"><h3>📌 دروس بحاجة لمراجعة</h3>${weak.map((w) => `<div><a href="#/quiz/${id}/${w.r.lesson}">${esc(w.r.title || w.r.lesson)}</a> <b>${w.avg}%</b></div>`).join('') || '<div class="muted">لا يوجد 👏</div>'}</div></div>
+      <h3 style="margin-top:16px">كل الدروس (الأضعف أولاً)</h3>
+      <table class="gt"><tr><th>الدرس</th><th>المعدل</th><th>آخر محاولة</th><th>أفضل</th><th>المحاولات</th></tr>${rows.map((w) => `
+        <tr><td>${esc(w.r.title || w.r.lesson)}</td><td><span class="badge" style="background:${lvl(w.avg).bg};color:${lvl(w.avg).c}">${w.avg}%</span></td>
+        <td>${w.r.score}/${w.r.total || QUIZ_LEN}</td><td>${w.r.best ?? w.r.score}</td><td>${w.r.attempts || (w.r.history || [1]).length}</td></tr>`).join('')}</table>`;
+    const missed = rows.slice(0, 3).flatMap((w) => (w.r.missed || []).slice(0, 4));
+    if (missed.length) html += `<div class="card" style="margin-top:14px"><h3>❓ أسئلة أخطأ فيها مؤخراً</h3>${missed.map((q) => `<div class="mq">• ${esc(q)}</div>`).join('')}</div>`;
+  }
+  if (x.g.length) html += `<h3 style="margin-top:16px">📝 علامات المدرسة</h3><table class="gt">${x.g.map((g) => `<tr><td>${esc(g.title)}</td><td>${g.score}/${g.outOf}</td><td>${esc(g.date || '')}</td></tr>`).join('')}</table>`;
+  app.innerHTML = html;
+}
+
+// ---- smart assistant (Gemini via Firebase AI Logic) ----
+const chatLog = [];
+let aiChat = null;
+const AI_MODELS = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
+const bubble = (m) => `<div class="msg ${m.who}">${m.who === 'bot' ? fmtAI(m.text) : esc(m.text)}</div>`;
+function fmtAI(t) { return esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/^[*-] /gm, '• ').replace(/\n/g, '<br>'); }
+function studentSummary() {
+  const st = S.subjects.map((s) => ({ s, ...subjectStats(s.id) })).filter((x) => x.n || x.g.length);
+  if (!st.length) return 'لم يحل الطالب أي اختبار بعد.';
+  return st.map((x) => {
+    const weak = x.rs.map((r) => ({ t: r.title || r.lesson, a: lessonAvg(r) })).sort((a, b) => a.a - b.a).slice(0, 3).filter((w) => w.a < 70);
+    return `- ${x.s.name}: معدل الاختبارات ${x.avg}%${x.g.length ? `، علامات المدرسة ${x.gAvg}%` : ''}${weak.length ? `، دروس ضعيفة: ${weak.map((w) => `${w.t} (${w.a}%)`).join('، ')}` : ''}`;
+  }).join('\n');
+}
+async function newChat() { // returns a factory: model name -> chat session
+  const ai = getAI(fb, { backend: new GoogleAIBackend() });
+  const sys = `أنت «المساعد الذكي»، معلّم خصوصي لطيف وصبور للطالب ${S.name} في ${S.grade} (المنهاج الفلسطيني).
+المواد: ${S.subjects.map((s) => s.name).join('، ')}.
+أداء الطالب الحالي من موقعه:
+${studentSummary()}
+تعليمات:
+- تكلّم بالعربية الفصحى المبسطة (ويمكن لمسة من اللهجة الفلسطينية)، بأسلوب يناسب عمر الطالب${/الثالث/.test(S.grade) ? ' (طفل عمره نحو 8 سنوات: جمل قصيرة جداً وأمثلة من حياته)' : ''}.
+- اشرح خطوة بخطوة واسأل الطالب ليفكّر، ولا تعطِ حلّ الواجب كاملاً دون شرح.
+- عند طلب خطة مراجعة ركّز على الدروس الضعيفة أعلاه.
+- في الإنجليزي اشرح بالعربية مع أمثلة إنجليزية.
+- إجاباتك قصيرة وواضحة، وابتعد عن أي موضوع غير مناسب للأطفال، وأعد الطالب بلطف إلى الدراسة.`;
+  return (m) => getGenerativeModel(ai, { model: m, systemInstruction: sys }).startChat({
+    history: chatLog.filter((x) => x.ok).map((x) => ({ role: x.who === 'me' ? 'user' : 'model', parts: [{ text: x.text }] })),
+  });
+}
+let aiModel = 0; // index into AI_MODELS; advances if a model name is unavailable
+async function askAI(q) {
+  chatLog.push({ who: 'me', text: q });
+  const pending = { who: 'bot', text: '…' }; chatLog.push(pending);
+  if (parse().name === 'ai') routes.ai();
+  try {
+    let r;
+    for (;;) {
+      try {
+        aiChat ||= (await newChat())(AI_MODELS[aiModel]);
+        r = await aiChat.sendMessage(q); break;
+      } catch (e) {
+        aiChat = null;
+        if (/not found|404|not supported/i.test(String(e && e.message)) && aiModel < AI_MODELS.length - 1) { aiModel++; continue; }
+        throw e;
+      }
+    }
+    pending.text = r.response.text(); pending.ok = true; chatLog[chatLog.length - 2].ok = true;
+  } catch (e) {
+    aiChat = null;
+    pending.text = /not.?enabled|has not been used|PERMISSION|api-not-enabled|403/i.test(String(e && e.message))
+      ? 'المساعد الذكي لسا مش مفعّل. ماما لازم تفعّل «AI Logic» من Firebase مرة وحدة.'
+      : 'صار خطأ بالاتصال، جرّب مرة ثانية بعد شوي.';
+    console.warn('AI error', e);
+  }
+  if (parse().name === 'ai') routes.ai();
+}
 
 // ---- in-site book reader (pdf.js, pages rendered as they scroll into view) ----
 const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
@@ -292,10 +454,13 @@ function runQuiz(s, lesson) {
     </div>`;
     const key = `${s.id}_${lesson.id}`, prev = results[key];
     try {
+      // history keeps every attempt for the report; missed keeps the last attempt's wrong questions
       await setDoc(doc(db, 'results', `${S.sid}_${key}`), {
-        sid: S.sid, subject: s.id, lesson: lesson.id, score, total,
+        sid: S.sid, subject: s.id, lesson: lesson.id, title: lesson.title, score, total,
         best: Math.max(score, prev && prev.best || 0), at: serverTimestamp(),
-      });
+        attempts: increment(1), history: arrayUnion({ score, total, t: Date.now() }),
+        missed: wrong.map((w) => w.q).slice(0, 30),
+      }, { merge: true });
     } catch { toast('ما انحفظت النتيجة (مشكلة اتصال)'); }
   }
   show();
