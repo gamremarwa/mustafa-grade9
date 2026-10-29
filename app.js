@@ -305,7 +305,7 @@ function subjectReport(id) {
 // ---- smart assistant (Gemini via Firebase AI Logic) ----
 const chatLog = [];
 let aiChat = null;
-const AI_MODELS = ['gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.0-flash'];
+const AI_MODELS = ['gemini-flash-lite-latest', 'gemini-flash-latest']; // older pinned names were retired by Google
 const bubble = (m) => `<div class="msg ${m.who}">${m.who === 'bot' ? fmtAI(m.text) : esc(m.text)}</div>`;
 function fmtAI(t) { return esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/^[*-] /gm, '• ').replace(/\n/g, '<br>'); }
 function studentSummary() {
@@ -345,7 +345,7 @@ async function askAI(q) {
         r = await aiChat.sendMessage(q); break;
       } catch (e) {
         aiChat = null;
-        if (/not found|404|not supported/i.test(String(e && e.message)) && aiModel < AI_MODELS.length - 1) { aiModel++; continue; }
+        if (/not found|404|not supported|no longer available/i.test(String(e && e.message)) && aiModel < AI_MODELS.length - 1) { aiModel++; continue; }
         throw e;
       }
     }
