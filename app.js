@@ -3,7 +3,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-auth.js';
 import { getFirestore, doc, onSnapshot, setDoc, collection, query, where, serverTimestamp, arrayUnion, increment } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-firestore.js';
-import { getAI, getGenerativeModel, GoogleAIBackend } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-ai.js';
 
 const S = window.SITE;
 const TESTS = window.TESTS = window.TESTS || {};
@@ -256,10 +255,17 @@ const routes = {
       <div class="muted" style="margin-bottom:8px">اسأل عن أي درس أو سؤال، أو اطلب خطة مراجعة لنقاط ضعفك.</div>
       <div class="chat" id="chat">${chatLog.map(bubble).join('') || `<div class="msg bot">أهلاً ${esc(S.name)} 👋 أنا مساعدك في الدراسة. شو بتحب نتعلم اليوم؟</div>`}</div>
       <div class="chips">${['اعملّي خطة مراجعة لنقاط ضعفي', 'اشرحلي درساً من كتاب العربي بطريقة سهلة', 'اسألني 5 أسئلة في الرياضيات', 'كيف أنظّم وقت دراستي؟'].map((t) => `<button class="chip">${t}</button>`).join('')}</div>
-      <form class="ask" id="askF"><input id="askQ" placeholder="اكتب سؤالك…" autocomplete="off"><button class="btn">إرسال</button></form>`;
+      ${pendingImg ? `<div class="pimg"><img src="${pendingImg.url}" alt=""><span>${esc(pendingImg.label || 'صورة مرفقة')}</span><button class="x" id="pimgX">✕</button></div>` : ''}
+      <form class="ask" id="askF"><label class="cam" title="صوّر السؤال أو اختر صورة">📷<input type="file" accept="image/*" capture="environment" id="askImg" hidden></label>
+        <input id="askQ" placeholder="${pendingImg ? 'اكتب شو بدك تعرف عن الصورة (اختياري)…' : 'اكتب سؤالك أو صوّر السؤال من الكتاب 📷'}" autocomplete="off"><button class="btn">إرسال</button></form>`;
     const box = $('chat'); box.scrollTop = box.scrollHeight;
     app.querySelectorAll('.chip').forEach((c) => c.onclick = () => askAI(c.textContent));
-    $('askF').onsubmit = (e) => { e.preventDefault(); const q = $('askQ').value.trim(); if (q) { $('askQ').value = ''; askAI(q); } };
+    $('askImg').onchange = async (e) => { const f = e.target.files[0]; if (f) { pendingImg = await shrinkImage(f); routes.ai(); } };
+    if (pendingImg) $('pimgX').onclick = () => { pendingImg = null; routes.ai(); };
+    $('askF').onsubmit = (e) => {
+      e.preventDefault(); const q = $('askQ').value.trim();
+      if (q || pendingImg) { const im = pendingImg; pendingImg = null; $('askQ').value = ''; askAI(q || 'اقرأ السؤال في الصورة واشرحلي كيف أحله خطوة خطوة', im); }
+    };
   },
 };
 routes.subject.keep = routes.books.keep = routes.read.keep = routes.ai.keep = true;
@@ -306,7 +312,21 @@ function subjectReport(id) {
 const chatLog = [];
 let aiChat = null;
 const AI_MODELS = ['gemini-flash-lite-latest', 'gemini-flash-latest']; // older pinned names were retired by Google
-const bubble = (m) => `<div class="msg ${m.who}">${m.who === 'bot' ? fmtAI(m.text) : esc(m.text)}</div>`;
+const bubble = (m) => `<div class="msg ${m.who}">${m.img ? `<img class="mimg" src="${m.img}" alt="">` : ''}${m.who === 'bot' ? fmtAI(m.text) : esc(m.text)}</div>`;
+let pendingImg = null; // {url, data, label} — image waiting to be sent with the next question
+function shrinkImage(src, label) { // File or canvas -> small JPEG so uploads stay fast on phones
+  return new Promise((ok) => {
+    const done = (img) => {
+      const k = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const url = c.toDataURL('image/jpeg', 0.8);
+      ok({ url, data: url.split(',')[1], label });
+    };
+    if (src instanceof HTMLCanvasElement) return done(src);
+    const im = new Image(); im.onload = () => done(im); im.src = URL.createObjectURL(src);
+  });
+}
 function fmtAI(t) { return esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/^[*-] /gm, '• ').replace(/\n/g, '<br>'); }
 function studentSummary() {
   const st = S.subjects.map((s) => ({ s, ...subjectStats(s.id) })).filter((x) => x.n || x.g.length);
@@ -316,7 +336,11 @@ function studentSummary() {
     return `- ${x.s.name}: معدل الاختبارات ${x.avg}%${x.g.length ? `، علامات المدرسة ${x.gAvg}%` : ''}${weak.length ? `، دروس ضعيفة: ${weak.map((w) => `${w.t} (${w.a}%)`).join('، ')}` : ''}`;
   }).join('\n');
 }
+let aiLib;
 async function newChat() { // returns a factory: model name -> chat session
+  // the AI SDK is only downloaded when the assistant is actually used, so other pages stay light
+  aiLib ||= await import('https://www.gstatic.com/firebasejs/12.3.0/firebase-ai.js');
+  const { getAI, getGenerativeModel, GoogleAIBackend } = aiLib;
   const ai = getAI(fb, { backend: new GoogleAIBackend() });
   const sys = `أنت «المساعد الذكي»، معلّم خصوصي لطيف وصبور للطالب ${S.name} في ${S.grade} (المنهاج الفلسطيني).
 المواد: ${S.subjects.map((s) => s.name).join('، ')}.
@@ -327,25 +351,30 @@ ${studentSummary()}
 - اشرح خطوة بخطوة واسأل الطالب ليفكّر، ولا تعطِ حلّ الواجب كاملاً دون شرح.
 - عند طلب خطة مراجعة ركّز على الدروس الضعيفة أعلاه.
 - في الإنجليزي اشرح بالعربية مع أمثلة إنجليزية.
+- إذا أرسل الطالب صورة سؤال أو صفحة من الكتاب: اقرأها بدقة، واشرح طريقة الحل خطوة بخطوة، ثم اذكر الجواب في النهاية ليتأكد منه.
 - إجاباتك قصيرة وواضحة، وابتعد عن أي موضوع غير مناسب للأطفال، وأعد الطالب بلطف إلى الدراسة.`;
   return (m) => getGenerativeModel(ai, { model: m, systemInstruction: sys }).startChat({
     history: chatLog.filter((x) => x.ok).map((x) => ({ role: x.who === 'me' ? 'user' : 'model', parts: [{ text: x.text }] })),
   });
 }
 let aiModel = 0; // index into AI_MODELS; advances if a model name is unavailable
-async function askAI(q) {
-  chatLog.push({ who: 'me', text: q });
+async function askAI(q, img) {
+  chatLog.push({ who: 'me', text: q, img: img && img.url });
   const pending = { who: 'bot', text: '…' }; chatLog.push(pending);
   if (parse().name === 'ai') routes.ai();
   try {
-    let r;
+    let r, tries = 0;
+    const msg = img ? [{ text: q }, { inlineData: { mimeType: 'image/jpeg', data: img.data } }] : q;
     for (;;) {
       try {
         aiChat ||= (await newChat())(AI_MODELS[aiModel]);
-        r = await aiChat.sendMessage(q); break;
+        r = await aiChat.sendMessage(msg); break;
       } catch (e) {
         aiChat = null;
-        if (/not found|404|not supported|no longer available/i.test(String(e && e.message)) && aiModel < AI_MODELS.length - 1) { aiModel++; continue; }
+        const m = String(e && e.message);
+        if (/not found|404|not supported|no longer available/i.test(m) && aiModel < AI_MODELS.length - 1) { aiModel++; continue; }
+        // transient: overloaded model, timeouts, or a Google server that hasn't picked up settings yet
+        if (/503|500|429|401|deadline|overloaded|fetch|network/i.test(m) && tries++ < 3) { await new Promise((ok) => setTimeout(ok, 1500 * tries)); continue; }
         throw e;
       }
     }
@@ -354,6 +383,7 @@ async function askAI(q) {
     aiChat = null;
     pending.text = /not.?enabled|has not been used|PERMISSION|api-not-enabled|403/i.test(String(e && e.message))
       ? 'المساعد الذكي لسا مش مفعّل. ماما لازم تفعّل «AI Logic» من Firebase مرة وحدة.'
+      : /429|quota|RESOURCE_EXHAUSTED/i.test(String(e && e.message)) ? 'المساعد وصل للحد اليومي المجاني، جرّب بعد شوي أو بكرا.'
       : 'صار خطأ بالاتصال، جرّب مرة ثانية بعد شوي.';
     console.warn('AI error', e);
   }
@@ -403,6 +433,11 @@ async function drawPage(pdf, n, el) {
   c.width = vp.width; c.height = vp.height;
   el.style.aspectRatio = `${vp.width} / ${vp.height}`;
   el.prepend(c);
+  const ask = document.createElement('button');
+  ask.className = 'askpage'; ask.textContent = '🤖 اسأل المساعد عن هالصفحة';
+  ask.onclick = async () => { const r = parse(); const s = subj(r.args[0]), b = s && s.books[+r.args[1]];
+    pendingImg = await shrinkImage(c, `صفحة ${n} — ${s ? s.name : ''} ${b ? b.title : ''}`); go('#/ai'); };
+  el.appendChild(ask);
   await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
 }
 

@@ -146,6 +146,15 @@ table.gt{width:100%;border-collapse:collapse;background:var(--card);border-radiu
 
 @media (max-width:560px){.sw{grid-template-columns:1fr}.gt{font-size:13px}}
 
+/* assistant images */
+.cam{display:grid;place-items:center;width:46px;border:1.5px solid var(--line);border-radius:12px;background:#fff;font-size:22px;cursor:pointer}
+.pimg{display:flex;align-items:center;gap:10px;background:#fff;border:1.5px dashed var(--brand2);border-radius:12px;padding:6px 10px;margin-bottom:8px}
+.pimg img{width:56px;height:56px;object-fit:cover;border-radius:8px}
+.pimg span{flex:1;font-size:14px;color:var(--muted)}
+.pimg .x{border:0;background:none;font-size:18px}
+.mimg{display:block;max-width:100%;max-height:220px;border-radius:10px;margin-bottom:6px}
+.askpage{position:absolute;top:8px;left:8px;border:0;border-radius:99px;padding:6px 12px;font-size:13px;font-weight:700;background:rgba(29,78,216,.9);color:#fff;box-shadow:var(--shadow)}
+
 /* book reader */
 .readbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
 .readbar b{flex:1;font-size:18px}
