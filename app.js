@@ -26,32 +26,53 @@ const subj = (id) => S.subjects.find((s) => s.id === id);
 // ---- state synced from Firestore ----
 let info = null;          // students/{sid}: {note, noteAt, order, start, grades[]}
 let results = {};         // key `${subject}_${lesson}` -> {score, best, at, attempts, history[], missed[]}
-let isMama = false;       // true when the signed-in account may edit (an «editor»)
-let user = null;          // signed-in Firebase user, editor or not
+let isMama = false;       // may edit this child's data (parent or admin)
+let canView = false;      // may see this child's private data (parent, admin, or the student)
+let user = null;          // signed-in Firebase user
+let access = { parents: [], students: [] }; // access/{sid}: who belongs to this child
 let infoLoaded = false;
+let unsubs = [];
 
 const fb = initializeApp(S.firebase);
 const auth = getAuth(fb);
 const db = getFirestore(fb);
 const infoRef = doc(db, 'students', S.sid);
+const accessRef = doc(db, 'access', S.sid);
 
-onSnapshot(infoRef, (snap) => { info = snap.exists() ? snap.data() : {}; infoLoaded = true; rerender(); },
-  () => { infoLoaded = true; info = info || {}; rerender(); });
-onSnapshot(query(collection(db, 'results'), where('sid', '==', S.sid)), (qs) => {
-  results = {};
-  qs.forEach((d) => { const r = d.data(); results[`${r.subject}_${r.lesson}`] = r; });
-  rerender();
-}, () => {});
+// private data is only fetched after login; visitors see an empty site
+function subscribe() {
+  unsubs.forEach((f) => f()); unsubs = [];
+  info = {}; results = {}; infoLoaded = !canView;
+  if (!canView) return;
+  unsubs.push(onSnapshot(infoRef, (snap) => { info = snap.exists() ? snap.data() : {}; infoLoaded = true; rerender(); },
+    () => { infoLoaded = true; rerender(); }));
+  unsubs.push(onSnapshot(query(collection(db, 'results'), where('sid', '==', S.sid)), (qs) => {
+    results = {};
+    qs.forEach((d) => { const r = d.data(); results[`${r.subject}_${r.lesson}`] = r; });
+    rerender();
+  }, () => {}));
+}
 onAuthStateChanged(auth, async (u) => {
-  user = u; isMama = false;
-  if (u) { // editors: the original admin account, or any email listed in editors/{email}
+  user = u; isMama = canView = false; access = { parents: [], students: [] };
+  if (u) {
     const em = (u.email || '').toLowerCase();
-    isMama = em === S.mamaEmail || await getDoc(doc(db, 'editors', em)).then((d) => d.exists(), () => false);
+    const [admin, acc] = await Promise.all([
+      em === S.mamaEmail ? true : getDoc(doc(db, 'editors', em)).then((d) => d.exists(), () => false),
+      getDoc(accessRef).then((d) => d.exists() ? d.data() : {}, () => ({})),
+    ]);
+    access = { parents: acc.parents || [], students: acc.students || [] };
+    isMama = admin || access.parents.includes(em);
+    canView = isMama || access.students.includes(em);
   }
   $('mamaBtn').textContent = u ? `👤 ${(u.email || '').split('@')[0]} · خروج` : '👤 تسجيل الدخول';
   $('mamaBtn').classList.toggle('on', !!u);
+  subscribe();
   rerender();
+  if (u && !canView) toast('حسابك لسا مش مربوط بهذا الطالب — اطلبي من الأهل إضافة إيميلك');
 });
+const loginCard = (what) => `<div class="card center"><div style="font-size:40px">🔒</div><h3>${what}</h3>
+  <div class="muted" style="margin-bottom:10px">هذه المعلومات خاصة. سجّل الدخول بحساب الطالب أو الأهل لرؤيتها.</div>
+  <button class="btn" onclick="document.getElementById('mamaBtn').click()">👤 تسجيل الدخول</button></div>`;
 
 // ---- helpers ----
 function toast(msg) {
@@ -106,7 +127,7 @@ const routes = {
           <textarea id="noteTxt" placeholder="اكتبي ملاحظة لـ ${esc(S.name)}…">${esc(n || '')}</textarea>
           <div class="acts"><button class="btn red" id="saveNote">حفظ التنبيه</button>
           <button class="btn ghost" id="clearNote">مسح</button></div>`
-        : `<div class="txt ${n ? '' : 'empty'}">${infoLoaded ? esc(n || 'لا يوجد تنبيه حالياً') : 'جاري التحميل…'}</div>`}
+        : `<div class="txt ${n ? '' : 'empty'}">${!canView ? '' : infoLoaded ? esc(n || 'لا يوجد تنبيه حالياً') : 'جاري التحميل…'}</div>`}
         ${info && info.noteAt ? `<div class="when">🕒 آخر تعديل: ${fmtDate(info.noteAt)}</div>` : ''}
       </section>
       <div class="big">
@@ -115,7 +136,7 @@ const routes = {
         <a class="bigbtn" href="#/report"><span class="ic">📊</span><b>التقرير</b><small>نقاط القوة والضعف</small></a>
         <a class="bigbtn" href="#/grades"><span class="ic">📝</span><b>علامات المدرسة</b><small>${isMama ? 'أضيفي علامة' : 'علاماتي'}</small></a>
         <a class="bigbtn wide" href="#/ai"><span class="ic">🤖</span><b>المساعد الذكي</b><small>اسأله عن أي شيء في دروسك</small></a>
-        ${isMama ? '<a class="bigbtn wide" href="#/accounts"><span class="ic">👥</span><b>الحسابات</b><small>مين مسموح له يعدّل</small></a>' : ''}
+        ${isMama ? '<a class="bigbtn wide" href="#/accounts"><span class="ic">👥</span><b>الحسابات</b><small>الأهل والطالب المرتبطين بالحساب</small></a>' : ''}
       </div>`;
     if (isMama) {
       $('saveNote').onclick = () => saveNote($('noteTxt').value.trim());
@@ -206,6 +227,7 @@ const routes = {
   },
 
   report(id) {
+    if (!canView) { app.innerHTML = `<h2 class="page">📊 التقرير</h2>${loginCard('التقرير خاص بالطالب وأهله')}`; return; }
     if (id) return subjectReport(id);
     const st = S.subjects.map((s) => ({ s, ...subjectStats(s.id) }));
     const tested = st.filter((x) => x.n);
@@ -229,6 +251,7 @@ const routes = {
   },
 
   grades() {
+    if (!canView) { app.innerHTML = `<h2 class="page">📝 علامات المدرسة</h2>${loginCard('العلامات خاصة بالطالب وأهله')}`; return; }
     const gs = grades().slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     let html = `<h2 class="page">📝 علامات المدرسة</h2>`;
     if (isMama) html += `<div class="card gform"><h3>➕ إضافة علامة</h3>
@@ -238,7 +261,7 @@ const routes = {
       <label>من<input id="gOut" type="number" min="1" value="20"></label></div>
       <label>التاريخ<input id="gDate" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>
       <button class="btn green" id="gAdd">حفظ العلامة</button></div>`;
-    else html += '<div class="muted" style="margin-bottom:10px">ماما بتضيف علامات امتحانات المدرسة من زر 🔒 ماما.</div>';
+    else html += '<div class="muted" style="margin-bottom:10px">الأهل بيضيفوا علامات امتحانات المدرسة من حسابهم.</div>';
     html += gs.length ? `<table class="gt"><tr><th>المادة</th><th>الامتحان</th><th>العلامة</th><th>التاريخ</th>${isMama ? '<th></th>' : ''}</tr>${gs.map((g) => {
       const s = subj(g.subject), p = Math.round(g.score / g.outOf * 100);
       return `<tr><td>${s ? s.icon + ' ' + esc(s.name) : ''}</td><td>${esc(g.title)}</td><td><span class="badge" style="background:${lvl(p).bg};color:${lvl(p).c}">${g.score}/${g.outOf}</span></td><td>${esc(g.date || '')}</td>${isMama ? `<td><button class="x" data-id="${g.id}">🗑</button></td>` : ''}</tr>`; }).join('')}</table>`
@@ -257,25 +280,26 @@ const routes = {
   },
 
   accounts() {
-    if (!isMama) { app.innerHTML = '<div class="card center muted">هذه الصفحة للمسؤولين فقط. سجّلي الدخول بحساب له صلاحية.</div>'; return; }
-    app.innerHTML = `<h2 class="page">👥 الحسابات المسموح لها بالتعديل</h2>
-      <div class="muted" style="margin-bottom:10px">أي شخص بيقدر يعمل حساب بإيميله، بس التعديل (التنبيه، الجدول، العلامات) بس للإيميلات اللي هون.</div>
-      <form class="ask" id="edF"><input id="edE" type="email" dir="ltr" placeholder="name@example.com"><button class="btn green">إضافة</button></form>
-      <div id="edL" class="card" style="margin-top:12px">جاري التحميل…</div>`;
-    const load = async () => {
-      const qs = await getDocs(collection(db, 'editors')).catch(() => null);
-      const rows = [`<div class="edrow"><span dir="ltr">${esc(S.mamaEmail)}</span><small class="muted">الحساب الأساسي</small></div>`];
-      qs && qs.forEach((d) => rows.push(`<div class="edrow"><span dir="ltr">${esc(d.id)}</span><button class="x" data-e="${esc(d.id)}">🗑</button></div>`));
-      $('edL').innerHTML = rows.join('');
-      $('edL').querySelectorAll('.x').forEach((b) => b.onclick = async () => {
-        if (b.dataset.e === (user.email || '').toLowerCase()) return toast('ما بتقدري تحذفي حسابك وإنتِ داخلة فيه');
-        if (confirm('إزالة صلاحية التعديل عن ' + b.dataset.e + '؟')) { await deleteDoc(doc(db, 'editors', b.dataset.e)).catch(() => toast('ما زبط')); load(); } });
+    if (!isMama) { app.innerHTML = `<h2 class="page">👥 الحسابات</h2>${loginCard('هذه الصفحة للأهل فقط')}`; return; }
+    const me = (user.email || '').toLowerCase();
+    const list = (k) => (access[k] || []).map((e) => `<div class="edrow"><span dir="ltr">${esc(e)}</span>${e === me ? '<small class="muted">أنتِ</small>' : `<button class="x" data-k="${k}" data-e="${esc(e)}">🗑</button>`}</div>`).join('') || '<div class="muted">لا يوجد</div>';
+    app.innerHTML = `<h2 class="page">👥 حسابات ${esc(S.name)}</h2>
+      <div class="muted" style="margin-bottom:12px">كل شخص بيعمل حساب بإيميله وكلمة مروره من زر «تسجيل الدخول»، وبعدين بتضيفي إيميله هون.</div>
+      <div class="card"><h3>👩‍👦 الأهل (يشوفوا ويعدّلوا: التنبيه، العلامات، الجدول)</h3>${list('parents')}
+        <form class="ask" data-k="parents" style="margin-top:10px"><input type="email" dir="ltr" placeholder="إيميل الأم أو الأب"><button class="btn green">إضافة</button></form></div>
+      <div class="card" style="margin-top:12px"><h3>🧒 ${esc(S.name)} (يشوف ويحل الاختبارات بس)</h3>${list('students')}
+        <form class="ask" data-k="students" style="margin-top:10px"><input type="email" dir="ltr" placeholder="إيميل الطالب"><button class="btn green">إضافة</button></form></div>`;
+    const save = async (k, arr) => {
+      try { await setDoc(accessRef, { [k]: arr }, { merge: true }); access[k] = arr; toast('تم الحفظ ✅'); routes.accounts(); }
+      catch { toast('ما زبط — تأكدي إن قواعد Firebase محدّثة'); }
     };
-    $('edF').onsubmit = async (e) => { e.preventDefault(); const em = $('edE').value.trim().toLowerCase();
+    app.querySelectorAll('form.ask').forEach((f) => f.onsubmit = (e) => { e.preventDefault();
+      const k = f.dataset.k, em = f.querySelector('input').value.trim().toLowerCase();
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) return toast('الإيميل غير صحيح');
-      try { await setDoc(doc(db, 'editors', em), { by: user.email, at: serverTimestamp() }); $('edE').value = ''; toast('تمت الإضافة ✅'); load(); }
-      catch { toast('ما زبط — تأكدي إن قواعد Firebase محدّثة'); } };
-    load();
+      if ((access[k] || []).includes(em)) return toast('موجود من قبل');
+      save(k, [...(access[k] || []), em]); });
+    app.querySelectorAll('.x').forEach((b) => b.onclick = () => {
+      if (confirm('إزالة ' + b.dataset.e + '؟')) save(b.dataset.k, access[b.dataset.k].filter((e) => e !== b.dataset.e)); });
   },
 
   ai() {
@@ -516,6 +540,7 @@ function runQuiz(s, lesson) {
         `<div class="it"><div>${esc(w.q)}</div><div class="w">إجابتك: ${esc(w.a)}</div><div class="c">الصحيح: ${esc(w.c)}</div></div>`).join('')}</div>` : ''}
     </div>`;
     const key = `${s.id}_${lesson.id}`, prev = results[key];
+    if (!canView) { app.querySelector('.card').insertAdjacentHTML('beforeend', '<div class="note" style="margin-top:14px"><div class="txt">🔒 النتيجة ما انحفظت لأنك مش داخل على حسابك. سجّل الدخول عشان تنحفظ نتائجك بالتقرير.</div></div>'); return; }
     try {
       // history keeps every attempt for the report; missed keeps the last attempt's wrong questions
       await setDoc(doc(db, 'results', `${S.sid}_${key}`), {
