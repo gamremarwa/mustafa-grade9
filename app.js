@@ -1,8 +1,8 @@
 // Shared app for the student study sites. Student-specific data lives in config.js,
 // quiz banks in tests-*.js (window.TESTS[subjectId]).
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-app.js';
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-auth.js';
-import { getFirestore, doc, onSnapshot, setDoc, collection, query, where, serverTimestamp, arrayUnion, increment } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-firestore.js';
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, sendPasswordResetEmail, signOut } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-auth.js';
+import { getFirestore, doc, getDoc, getDocs, deleteDoc, onSnapshot, setDoc, collection, query, where, serverTimestamp, arrayUnion, increment } from 'https://www.gstatic.com/firebasejs/12.3.0/firebase-firestore.js';
 
 const S = window.SITE;
 const TESTS = window.TESTS = window.TESTS || {};
@@ -26,7 +26,8 @@ const subj = (id) => S.subjects.find((s) => s.id === id);
 // ---- state synced from Firestore ----
 let info = null;          // students/{sid}: {note, noteAt, order, start, grades[]}
 let results = {};         // key `${subject}_${lesson}` -> {score, best, at, attempts, history[], missed[]}
-let isMama = false;
+let isMama = false;       // true when the signed-in account may edit (an «editor»)
+let user = null;          // signed-in Firebase user, editor or not
 let infoLoaded = false;
 
 const fb = initializeApp(S.firebase);
@@ -41,10 +42,14 @@ onSnapshot(query(collection(db, 'results'), where('sid', '==', S.sid)), (qs) => 
   qs.forEach((d) => { const r = d.data(); results[`${r.subject}_${r.lesson}`] = r; });
   rerender();
 }, () => {});
-onAuthStateChanged(auth, (u) => {
-  isMama = !!u;
-  $('mamaBtn').textContent = isMama ? '🔓 خروج ماما' : '🔒 ماما';
-  $('mamaBtn').classList.toggle('on', isMama);
+onAuthStateChanged(auth, async (u) => {
+  user = u; isMama = false;
+  if (u) { // editors: the original admin account, or any email listed in editors/{email}
+    const em = (u.email || '').toLowerCase();
+    isMama = em === S.mamaEmail || await getDoc(doc(db, 'editors', em)).then((d) => d.exists(), () => false);
+  }
+  $('mamaBtn').textContent = u ? `👤 ${(u.email || '').split('@')[0]} · خروج` : '👤 تسجيل الدخول';
+  $('mamaBtn').classList.toggle('on', !!u);
   rerender();
 });
 
@@ -110,6 +115,7 @@ const routes = {
         <a class="bigbtn" href="#/report"><span class="ic">📊</span><b>التقرير</b><small>نقاط القوة والضعف</small></a>
         <a class="bigbtn" href="#/grades"><span class="ic">📝</span><b>علامات المدرسة</b><small>${isMama ? 'أضيفي علامة' : 'علاماتي'}</small></a>
         <a class="bigbtn wide" href="#/ai"><span class="ic">🤖</span><b>المساعد الذكي</b><small>اسأله عن أي شيء في دروسك</small></a>
+        ${isMama ? '<a class="bigbtn wide" href="#/accounts"><span class="ic">👥</span><b>الحسابات</b><small>مين مسموح له يعدّل</small></a>' : ''}
       </div>`;
     if (isMama) {
       $('saveNote').onclick = () => saveNote($('noteTxt').value.trim());
@@ -248,6 +254,28 @@ const routes = {
       if (!confirm('حذف هذه العلامة؟')) return;
       try { await setDoc(infoRef, { grades: grades().filter((g) => g.id !== b.dataset.id) }, { merge: true }); toast('تم الحذف'); } catch { toast('ما زبط الحذف'); }
     });
+  },
+
+  accounts() {
+    if (!isMama) { app.innerHTML = '<div class="card center muted">هذه الصفحة للمسؤولين فقط. سجّلي الدخول بحساب له صلاحية.</div>'; return; }
+    app.innerHTML = `<h2 class="page">👥 الحسابات المسموح لها بالتعديل</h2>
+      <div class="muted" style="margin-bottom:10px">أي شخص بيقدر يعمل حساب بإيميله، بس التعديل (التنبيه، الجدول، العلامات) بس للإيميلات اللي هون.</div>
+      <form class="ask" id="edF"><input id="edE" type="email" dir="ltr" placeholder="name@example.com"><button class="btn green">إضافة</button></form>
+      <div id="edL" class="card" style="margin-top:12px">جاري التحميل…</div>`;
+    const load = async () => {
+      const qs = await getDocs(collection(db, 'editors')).catch(() => null);
+      const rows = [`<div class="edrow"><span dir="ltr">${esc(S.mamaEmail)}</span><small class="muted">الحساب الأساسي</small></div>`];
+      qs && qs.forEach((d) => rows.push(`<div class="edrow"><span dir="ltr">${esc(d.id)}</span><button class="x" data-e="${esc(d.id)}">🗑</button></div>`));
+      $('edL').innerHTML = rows.join('');
+      $('edL').querySelectorAll('.x').forEach((b) => b.onclick = async () => {
+        if (b.dataset.e === (user.email || '').toLowerCase()) return toast('ما بتقدري تحذفي حسابك وإنتِ داخلة فيه');
+        if (confirm('إزالة صلاحية التعديل عن ' + b.dataset.e + '؟')) { await deleteDoc(doc(db, 'editors', b.dataset.e)).catch(() => toast('ما زبط')); load(); } });
+    };
+    $('edF').onsubmit = async (e) => { e.preventDefault(); const em = $('edE').value.trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) return toast('الإيميل غير صحيح');
+      try { await setDoc(doc(db, 'editors', em), { by: user.email, at: serverTimestamp() }); $('edE').value = ''; toast('تمت الإضافة ✅'); load(); }
+      catch { toast('ما زبط — تأكدي إن قواعد Firebase محدّثة'); } };
+    load();
   },
 
   ai() {
@@ -508,22 +536,29 @@ async function saveNote(text) {
 }
 function openLogin() {
   const m = $('modal');
-  $('modalBox').innerHTML = `<h3>🔒 دخول ماما</h3><div class="muted">اكتبي كلمة المرور للتعديل</div>
-    <input type="password" id="pw" autocomplete="current-password" placeholder="كلمة المرور">
+  $('modalBox').innerHTML = `<h3>👤 تسجيل الدخول</h3><div class="muted">ادخلي بإيميلك وكلمة المرور الخاصة فيك</div>
+    <input type="email" id="em" autocomplete="email" placeholder="البريد الإلكتروني" dir="ltr">
+    <input type="password" id="pw" autocomplete="current-password" placeholder="كلمة المرور" dir="ltr">
     <div class="err" id="pwErr"></div>
-    <div style="display:flex;gap:8px"><button class="btn" id="pwGo">دخول</button><button class="btn ghost" id="pwX">إلغاء</button></div>`;
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="pwGo">دخول</button><button class="btn ghost" id="pwNew">حساب جديد</button><button class="btn ghost" id="pwX">إلغاء</button></div>
+    <a href="#" id="pwForgot" class="muted" style="display:block;margin-top:10px;font-size:14px">نسيت كلمة المرور؟</a>`;
   m.classList.add('show');
-  const go = async () => {
-    $('pwErr').textContent = '';
-    try { await signInWithEmailAndPassword(auth, S.mamaEmail, $('pw').value); m.classList.remove('show'); toast('أهلاً ماما 💙'); }
-    catch { $('pwErr').textContent = 'كلمة المرور غير صحيحة'; }
-  };
-  $('pwGo').onclick = go;
-  $('pw').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+  const val = () => ({ e: $('em').value.trim().toLowerCase(), p: $('pw').value });
+  const err = (t) => { $('pwErr').textContent = t; };
+  const msgOf = (e) => { const c = String(e && e.code); return /invalid-email/.test(c) ? 'الإيميل غير صحيح'
+    : /email-already-in-use/.test(c) ? 'هذا الإيميل عنده حساب، اضغطي «دخول»' : /weak-password/.test(c) ? 'كلمة المرور لازم تكون 6 أحرف أو أكثر'
+    : /too-many-requests/.test(c) ? 'محاولات كثيرة، استني شوي' : 'الإيميل أو كلمة المرور غير صحيحة'; };
+  $('pwGo').onclick = async () => { const { e, p } = val(); err('');
+    try { await signInWithEmailAndPassword(auth, e, p); m.classList.remove('show'); toast('أهلاً وسهلاً 💙'); } catch (x) { err(msgOf(x)); } };
+  $('pwNew').onclick = async () => { const { e, p } = val(); err('');
+    try { await createUserWithEmailAndPassword(auth, e, p); m.classList.remove('show'); toast('تم إنشاء حسابك ✅ — المسؤولة بتعطيك صلاحية التعديل'); } catch (x) { err(msgOf(x)); } };
+  $('pwForgot').onclick = async (ev) => { ev.preventDefault(); const { e } = val(); if (!e) return err('اكتبي إيميلك أولاً');
+    try { await sendPasswordResetEmail(auth, e); err(''); toast('بعتنالك رابط لتغيير كلمة المرور على الإيميل 📧'); } catch (x) { err(msgOf(x)); } };
+  $('pw').onkeydown = (ev) => { if (ev.key === 'Enter') $('pwGo').click(); };
   $('pwX').onclick = () => m.classList.remove('show');
-  setTimeout(() => $('pw').focus(), 50);
+  setTimeout(() => $('em').focus(), 50);
 }
-$('mamaBtn').onclick = () => isMama ? signOut(auth).then(() => toast('تم الخروج')) : openLogin();
+$('mamaBtn').onclick = () => user ? signOut(auth).then(() => toast('تم الخروج')) : openLogin();
 $('modal').onclick = (e) => { if (e.target.id === 'modal') e.target.classList.remove('show'); };
 
 // ---- router ----
